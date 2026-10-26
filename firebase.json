@@ -1,0 +1,40 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "flow-take-f2399",
+          "appId": "1:762976132110:android:32d30e6cc0a63d7398b05f",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "flow-take-f2399",
+          "configurations": {
+            "android": "1:762976132110:android:32d30e6cc0a63d7398b05f",
+            "ios": "1:762976132110:ios:cb885925f600af0998b05f",
+            "macos": "1:762976132110:ios:cb885925f600af0998b05f",
+            "web": "1:762976132110:web:acce981aa8117aa598b05f",
+            "windows": "1:762976132110:web:de5eab36d1bf806598b05f"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log"
+      ]
+    }
+  ],
+  "firestore": {
+    "rules": "firestore.rules"
+  }
+}
