@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'home_screen.dart';
+import 'store_gate_router.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 
@@ -133,10 +133,10 @@ class _EmailOtpScreenState extends State<EmailOtpScreen> {
     try {
       final profile = await widget.authService.verifyEmailOtp(_emailController.text.trim(), otp);
       if (mounted) {
-        // Pop back to root or push replacement to HomeScreen
+        // Pop back to root or push replacement to StoreGateRouter
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(
-            builder: (_) => HomeScreen(
+            builder: (_) => StoreGateRouter(
               user: profile,
               authService: widget.authService,
             ),

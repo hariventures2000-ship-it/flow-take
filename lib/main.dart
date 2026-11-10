@@ -1,7 +1,7 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'firebase_options.dart';
-import 'screens/home_screen.dart';
+import 'screens/store_gate_router.dart';
 import 'screens/welcome_screen.dart';
 import 'services/auth_service.dart';
 import 'theme/app_theme.dart';
@@ -56,9 +56,9 @@ class _MyAppState extends State<MyApp> {
             );
           }
 
-          // If user is authenticated, show Dashboard; else show Take.app Welcome Screen
+          // If user is authenticated, route through StoreGateRouter to check user stores
           if (snapshot.hasData && snapshot.data != null) {
-            return HomeScreen(
+            return StoreGateRouter(
               user: snapshot.data!,
               authService: _authService,
             );
