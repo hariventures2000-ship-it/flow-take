@@ -1,17 +1,121 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Represents an authenticated user profile (supports both Firebase and verified OTP sessions)
+class AppUserProfile {
+  final String uid;
+  final String? email;
+  final String? displayName;
+  final String? photoURL;
+
+  const AppUserProfile({
+    required this.uid,
+    this.email,
+    this.displayName,
+    this.photoURL,
+  });
+
+  factory AppUserProfile.fromFirebaseUser(User user) {
+    return AppUserProfile(
+      uid: user.uid,
+      email: user.email,
+      displayName: user.displayName,
+      photoURL: user.photoURL,
+    );
+  }
+
+  factory AppUserProfile.fromJson(Map<String, dynamic> json) {
+    return AppUserProfile(
+      uid: json['uid'] as String? ?? '',
+      email: json['email'] as String?,
+      displayName: json['displayName'] as String?,
+      photoURL: json['photoURL'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'uid': uid,
+        'email': email,
+        'displayName': displayName,
+        'photoURL': photoURL,
+      };
+}
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
-  Stream<User?> get authStateChanges => _auth.authStateChanges();
-  User? get currentUser => _auth.currentUser;
+  static const String _kLocalUserKey = 'flowtake_active_user_session';
+  final StreamController<AppUserProfile?> _authStateController =
+      StreamController<AppUserProfile?>.broadcast();
+
+  AuthService() {
+    _initAuthState();
+  }
+
+  Future<void> _initAuthState() async {
+    // Listen to Firebase native auth changes
+    _auth.authStateChanges().listen((user) async {
+      if (user != null) {
+        final profile = AppUserProfile.fromFirebaseUser(user);
+        await _saveLocalSession(profile);
+        _authStateController.add(profile);
+      } else {
+        // Check if there is a verified OTP session stored locally
+        final local = await _loadLocalSession();
+        _authStateController.add(local);
+      }
+    });
+  }
+
+  Stream<AppUserProfile?> get appAuthStateChanges =>
+      _authStateController.stream;
+
+  AppUserProfile? get currentProfile {
+    if (_auth.currentUser != null) {
+      return AppUserProfile.fromFirebaseUser(_auth.currentUser!);
+    }
+    return null;
+  }
+
+  Future<void> _saveLocalSession(AppUserProfile profile) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kLocalUserKey, jsonEncode(profile.toJson()));
+    } catch (e) {
+      debugPrint('Local session save error: $e');
+    }
+  }
+
+  Future<AppUserProfile?> _loadLocalSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final str = prefs.getString(_kLocalUserKey);
+      if (str != null && str.isNotEmpty) {
+        final data = jsonDecode(str) as Map<String, dynamic>;
+        return AppUserProfile.fromJson(data);
+      }
+    } catch (e) {
+      debugPrint('Local session load error: $e');
+    }
+    return null;
+  }
+
+  Future<void> _clearLocalSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kLocalUserKey);
+    } catch (e) {
+      debugPrint('Local session clear error: $e');
+    }
+  }
 
   /// Sign in with Google
   Future<UserCredential> signInWithGoogle() async {
@@ -37,7 +141,10 @@ class AuthService {
 
       // Create or update user profile in Firestore
       if (userCredential.user != null) {
-        await _syncUserProfile(userCredential.user!);
+        final profile = AppUserProfile.fromFirebaseUser(userCredential.user!);
+        await _saveLocalSession(profile);
+        _authStateController.add(profile);
+        await _syncUserProfile(profile.uid, email: profile.email, displayName: profile.displayName, photoURL: profile.photoURL);
       }
 
       return userCredential;
@@ -47,121 +154,138 @@ class AuthService {
     }
   }
 
-  // Active OTP records stored in memory (hashed verification)
-  static final Map<String, _OtpRecord> _activeOtps = {};
+  /// Production Next.js Resend OTP backend URL
+  static const String _backendUrl = 'https://otp-generator-bice.vercel.app';
 
-  /// Request 6-digit Email OTP delivered to user's real email address
+  /// Request 6-digit Email OTP delivered via the Next.js Resend backend
   Future<void> sendEmailOtp(String email) async {
     final cleanEmail = email.trim().toLowerCase();
-
-    // Rate-limiting: minimum 30s cooldown
-    final now = DateTime.now();
-    final prev = _activeOtps[cleanEmail];
-    if (prev != null && now.difference(prev.createdAt).inSeconds < 30) {
-      final wait = 30 - now.difference(prev.createdAt).inSeconds;
-      throw Exception('Please wait $wait seconds before requesting another code.');
-    }
-
-    // Generate random 6-digit code
-    final randomDigits = (100000 + (DateTime.now().microsecondsSinceEpoch % 900000)).toString();
-
-    // Send real email via EmailJS API
-    // Using standard secure public REST mailer endpoint
-    bool emailDelivered = false;
     try {
+      final uri = Uri.parse('$_backendUrl/api/auth/request-otp');
       final response = await http.post(
-        Uri.parse('https://api.emailjs.com/api/v1.0/email/send'),
+        uri,
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'service_id': 'service_flowtake',
-          'template_id': 'template_otp',
-          'user_id': 'public_key_flowtake',
-          'template_params': {
-            'to_email': cleanEmail,
-            'otp_code': randomDigits,
-            'app_name': 'FlowTake',
-          }
-        }),
-      ).timeout(const Duration(seconds: 4));
+        body: jsonEncode({'email': cleanEmail}),
+      ).timeout(const Duration(seconds: 12));
 
       if (response.statusCode == 200) {
-        emailDelivered = true;
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          debugPrint('[FlowTake Auth] OTP successfully dispatched to $cleanEmail');
+          return;
+        } else {
+          throw Exception(data['error'] ?? 'Server error');
+        }
+      } else if (response.statusCode == 429) {
+        final data = jsonDecode(response.body);
+        throw Exception(data['error'] ?? 'Too many attempts. Please wait before retrying.');
+      } else {
+        try {
+          final data = jsonDecode(response.body);
+          throw Exception(data['error'] ?? 'Server responded with status ${response.statusCode}');
+        } catch (e) {
+          if (e is Exception) rethrow;
+          throw Exception('Server error (${response.statusCode})');
+        }
       }
-    } catch (_) {
-      // In case outgoing port is blocked or direct REST mailer times out
-    }
-
-    // Save record
-    _activeOtps[cleanEmail] = _OtpRecord(
-      code: randomDigits,
-      createdAt: now,
-      expiresAt: now.add(const Duration(minutes: 5)),
-    );
-
-    debugPrint('====================================================');
-    debugPrint('[FlowTake Auth] VERIFICATION CODE FOR $cleanEmail: $randomDigits');
-    debugPrint('====================================================');
-
-    if (!emailDelivered) {
-      // Note: Because Google Cloud Functions requires the paid Blaze plan to host a private email backend,
-      // the verification code is printed to logs and also available as: $randomDigits
+    } catch (e) {
+      final errStr = e.toString().replaceAll('Exception: ', '');
+      throw Exception(errStr);
     }
   }
 
-  /// Verify 6-digit Email OTP sent to user's email and authenticate
-  Future<UserCredential> verifyEmailOtp(String email, String otp) async {
+  /// Verify 6-digit Email OTP via the backend and establish authenticated app session
+  Future<AppUserProfile> verifyEmailOtp(String email, String otp) async {
     final cleanEmail = email.trim().toLowerCase();
     final cleanOtp = otp.trim();
 
-    final record = _activeOtps[cleanEmail];
-    if (record == null) {
-      throw Exception('No verification code requested for this email. Please request a new code.');
-    }
-
-    if (DateTime.now().isAfter(record.expiresAt)) {
-      _activeOtps.remove(cleanEmail);
-      throw Exception('Verification code has expired. Please request a new one.');
-    }
-
-    if (cleanOtp != record.code && cleanOtp != '123456') {
-      throw Exception('Invalid verification code. Please check and try again.');
-    }
-
-    _activeOtps.remove(cleanEmail);
-
-    // Sign into Firebase Auth
     try {
-      final userCred = await _auth.signInAnonymously();
-      await _syncUserProfile(userCred.user!);
-      return userCred;
-    } catch (e) {
-      debugPrint('Firebase Auth sign in error: $e');
-      if (_auth.currentUser != null) {
-        return _auth.signInAnonymously();
+      final uri = Uri.parse('$_backendUrl/api/auth/verify-otp');
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': cleanEmail, 'otp': cleanOtp}),
+      ).timeout(const Duration(seconds: 12));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          final userJson = data['user'] as Map<String, dynamic>?;
+          final uid = userJson?['uid'] as String? ??
+              'usr_${cleanEmail.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_')}';
+          final name = cleanEmail.split('@')[0];
+
+          final profile = AppUserProfile(
+            uid: uid,
+            email: cleanEmail,
+            displayName: name,
+          );
+
+          // Save session locally for persistence
+          await _saveLocalSession(profile);
+          _authStateController.add(profile);
+
+          // Non-blocking Firestore sync (doesn't stall screen navigation if Firestore isn't provisioned)
+          unawaited(_syncUserProfile(profile.uid, email: profile.email, displayName: profile.displayName));
+
+          return profile;
+        } else {
+          throw Exception(data['error'] ?? 'Verification failed.');
+        }
+      } else if (response.statusCode == 400 ||
+          response.statusCode == 409 ||
+          response.statusCode == 410 ||
+          response.statusCode == 429) {
+        try {
+          final data = jsonDecode(response.body);
+          throw Exception(data['error'] ?? 'Verification rejected by server.');
+        } catch (e) {
+          if (e is Exception) rethrow;
+          throw Exception('Verification failed (${response.statusCode})');
+        }
+      } else {
+        try {
+          final data = jsonDecode(response.body);
+          throw Exception(data['error'] ?? 'Server error (${response.statusCode})');
+        } catch (e) {
+          if (e is Exception) rethrow;
+          throw Exception('Verification failed (${response.statusCode})');
+        }
       }
-      throw Exception('Successfully verified OTP for $cleanEmail');
+    } catch (e) {
+      final errStr = e.toString().replaceAll('Exception: ', '');
+      throw Exception(errStr);
     }
   }
 
   /// Sync user profile into Firestore if available
-  Future<void> _syncUserProfile(User user) async {
+  Future<void> _syncUserProfile(
+    String uid, {
+    String? email,
+    String? displayName,
+    String? photoURL,
+  }) async {
     try {
-      final docRef = _firestore.collection('users').doc(user.uid);
+      final userEmail = email ?? '';
+      final docRef = _firestore.collection('users').doc(uid);
       await docRef.set({
-        'uid': user.uid,
-        'email': user.email,
-        'displayName': user.displayName,
-        'photoURL': user.photoURL,
+        'uid': uid,
+        'email': userEmail,
+        'displayName': displayName ?? (userEmail.isNotEmpty ? userEmail.split('@')[0] : 'User'),
+        'photoURL': photoURL,
         'lastLoginAt': FieldValue.serverTimestamp(),
+        'authProvider': 'email_otp',
       }, SetOptions(merge: true));
     } catch (e) {
-      debugPrint('Firestore sync skipped: $e');
+      debugPrint('Firestore profile sync note: $e');
     }
   }
 
   /// Sign out
   Future<void> signOut() async {
     try {
+      await _clearLocalSession();
+      _authStateController.add(null);
       await Future.wait([
         _auth.signOut(),
         _googleSignIn.signOut(),
@@ -170,16 +294,8 @@ class AuthService {
       debugPrint('Sign-out error: $e');
     }
   }
-}
 
-class _OtpRecord {
-  final String code;
-  final DateTime createdAt;
-  final DateTime expiresAt;
-
-  _OtpRecord({
-    required this.code,
-    required this.createdAt,
-    required this.expiresAt,
-  });
+  void dispose() {
+    _authStateController.close();
+  }
 }

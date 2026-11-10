@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'home_screen.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 
@@ -114,6 +115,8 @@ class _EmailOtpScreenState extends State<EmailOtpScreen> {
   }
 
   Future<void> _handleVerifyCode() async {
+    if (_isLoading) return;
+
     final otp = _otpControllers.map((c) => c.text.trim()).join();
     if (otp.length < 6) {
       setState(() {
@@ -128,15 +131,26 @@ class _EmailOtpScreenState extends State<EmailOtpScreen> {
     });
 
     try {
-      await widget.authService.verifyEmailOtp(_emailController.text.trim(), otp);
+      final profile = await widget.authService.verifyEmailOtp(_emailController.text.trim(), otp);
       if (mounted) {
-        Navigator.of(context).pop(); // Back to root, StreamBuilder navigates to home
+        // Pop back to root or push replacement to HomeScreen
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => HomeScreen(
+              user: profile,
+              authService: widget.authService,
+            ),
+          ),
+          (route) => false,
+        );
       }
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = e.toString().replaceAll('Exception: ', '');
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = e.toString().replaceAll('Exception: ', '');
+        });
+      }
     }
   }
 
